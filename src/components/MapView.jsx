@@ -1,4 +1,5 @@
  import { useEffect, useState } from "react";
+
 import {
   MapContainer,
   TileLayer,
@@ -6,150 +7,232 @@ import {
   Popup,
   Polyline,
   useMap,
-  LayersControl,
 } from "react-leaflet";
+
+import L from "leaflet";
 
 import "leaflet/dist/leaflet.css";
 import "./MapView.css";
 
 import {
   searchPlaces,
-  getDrivingRoute,
+  getDrivingRoutes,
+  formatDistance,
+  formatDuration,
 } from "../services/mapsApi";
 
-const defaultPosition = [17.385, 78.4867];
+const DEFAULT_LOCATION = [17.385, 78.4867];
 
-function LocationController({ position }) {
+const currentLocationIcon = L.divIcon({
+  className: "custom-location-marker",
+  html: `
+    <div class="marker-pin current-pin">
+      <div class="marker-center"></div>
+    </div>
+  `,
+  iconSize: [42, 42],
+  iconAnchor: [21, 42],
+  popupAnchor: [0, -42],
+});
+
+const destinationIcon = L.divIcon({
+  className: "custom-destination-marker",
+  html: `
+    <div class="destination-pin">
+      <div class="destination-center"></div>
+    </div>
+  `,
+  iconSize: [46, 46],
+  iconAnchor: [23, 46],
+  popupAnchor: [0, -46],
+});
+
+function MapController({ position }) {
   const map = useMap();
 
   useEffect(() => {
-    if (position) {
-      map.flyTo(position, 15);
+    if (!position) {
+      return;
     }
+
+    map.flyTo(position, 14, {
+      duration: 1.2,
+    });
   }, [position, map]);
 
   return null;
 }
 
-function RouteController({ coordinates }) {
+function RouteController({ start, destination }) {
   const map = useMap();
 
   useEffect(() => {
-    if (coordinates.length > 0) {
-      map.fitBounds(coordinates, {
-        padding: [50, 50],
-      });
+    if (!start || !destination) {
+      return;
     }
-  }, [coordinates, map]);
+
+    const bounds = L.latLngBounds([
+      start,
+      destination,
+    ]);
+
+    map.fitBounds(bounds, {
+      padding: [70, 70],
+      maxZoom: 14,
+    });
+  }, [start, destination, map]);
 
   return null;
 }
 
-function formatDuration(seconds) {
-  const minutes = Math.round(seconds / 60);
-
-  if (minutes < 60) {
-    return `${minutes} min`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  const remainingMinutes = minutes % 60;
-
-  if (remainingMinutes === 0) {
-    return `${hours} hr`;
-  }
-
-  return `${hours} hr ${remainingMinutes} min`;
-}
-
 function MapView() {
-  const [userPosition, setUserPosition] = useState(null);
-  const [selectedLocation, setSelectedLocation] =
-    useState(null);
+  const [position, setPosition] =
+    useState(DEFAULT_LOCATION);
 
-  const [searchQuery, setSearchQuery] = useState("");
+  const [search, setSearch] = useState("");
+
   const [searchResults, setSearchResults] =
     useState([]);
 
-  const [isSearching, setIsSearching] =
-    useState(false);
-  const [searchError, setSearchError] =
-    useState("");
-
-  const [routeCoordinates, setRouteCoordinates] =
-    useState([]);
-  const [routeInfo, setRouteInfo] =
+  const [destination, setDestination] =
     useState(null);
+
+  const [routes, setRoutes] = useState([]);
+
+  const [selectedRouteId, setSelectedRouteId] =
+    useState(null);
+
+  const [searchLoading, setSearchLoading] =
+    useState(false);
+
+  const [locationLoading, setLocationLoading] =
+    useState(false);
+
   const [routeLoading, setRouteLoading] =
     useState(false);
-  const [routeError, setRouteError] =
+
+  const [message, setMessage] =
     useState("");
-
-  const [savedLocations, setSavedLocations] =
-    useState(() => {
-      const saved =
-        localStorage.getItem("savedLocations");
-
-      return saved ? JSON.parse(saved) : [];
-    });
 
   const [recentSearches, setRecentSearches] =
     useState(() => {
-      const recent =
-        localStorage.getItem("recentSearches");
+      try {
+        const saved =
+          localStorage.getItem(
+            "recentSearches"
+          );
 
-      return recent ? JSON.parse(recent) : [];
+        return saved
+          ? JSON.parse(saved)
+          : [];
+      } catch {
+        return [];
+      }
     });
 
-  const getUserLocation = () => {
-    setSearchError("");
+  const [savedPlaces, setSavedPlaces] =
+    useState(() => {
+      try {
+        const saved =
+          localStorage.getItem(
+            "savedPlaces"
+          );
 
+        return saved
+          ? JSON.parse(saved)
+          : [];
+      } catch {
+        return [];
+      }
+    });
+
+  const saveRecentSearch = (place) => {
+    setRecentSearches((previous) => {
+      const filtered = previous.filter(
+        (item) => item.id !== place.id
+      );
+
+      const updated = [
+        place,
+        ...filtered,
+      ].slice(0, 5);
+
+      localStorage.setItem(
+        "recentSearches",
+        JSON.stringify(updated)
+      );
+
+      return updated;
+    });
+  };
+
+  const savePlace = (place) => {
+    setSavedPlaces((previous) => {
+      const exists = previous.some(
+        (item) => item.id === place.id
+      );
+
+      if (exists) {
+        return previous;
+      }
+
+      const updated = [
+        ...previous,
+        place,
+      ].slice(0, 8);
+
+      localStorage.setItem(
+        "savedPlaces",
+        JSON.stringify(updated)
+      );
+
+      return updated;
+    });
+  };
+
+  const removeSavedPlace = (id) => {
+    setSavedPlaces((previous) => {
+      const updated = previous.filter(
+        (item) => item.id !== id
+      );
+
+      localStorage.setItem(
+        "savedPlaces",
+        JSON.stringify(updated)
+      );
+
+      return updated;
+    });
+  };
+
+  const findMyLocation = () => {
     if (!navigator.geolocation) {
-      setSearchError(
+      setMessage(
         "Geolocation is not supported by your browser."
       );
+
       return;
     }
 
+    setLocationLoading(true);
+    setMessage("");
+
     navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const location = [
-          position.coords.latitude,
-          position.coords.longitude,
+      (result) => {
+        const newPosition = [
+          result.coords.latitude,
+          result.coords.longitude,
         ];
 
-        setUserPosition(location);
-        setSelectedLocation(null);
-        setRouteCoordinates([]);
-        setRouteInfo(null);
-        setRouteError("");
+        setPosition(newPosition);
+        setLocationLoading(false);
+        setMessage("Your location has been found.");
       },
-      (error) => {
-        if (
-          error.code ===
-          error.PERMISSION_DENIED
-        ) {
-          setSearchError(
-            "Location permission was denied."
-          );
-        } else if (
-          error.code ===
-          error.POSITION_UNAVAILABLE
-        ) {
-          setSearchError(
-            "Your location is unavailable."
-          );
-        } else if (
-          error.code === error.TIMEOUT
-        ) {
-          setSearchError(
-            "Location request timed out."
-          );
-        } else {
-          setSearchError(
-            "Unable to get your location."
-          );
-        }
+      () => {
+        setLocationLoading(false);
+        setMessage(
+          "Unable to access your location. Please allow location permission."
+        );
       },
       {
         enableHighAccuracy: true,
@@ -159,728 +242,609 @@ function MapView() {
     );
   };
 
-  const handleSearch = async (event) => {
-    event.preventDefault();
+  const performSearch = async (
+    searchText = search
+  ) => {
+    const query = searchText.trim();
 
-    if (!searchQuery.trim()) {
+    if (!query) {
+      setMessage(
+        "Enter a place to search."
+      );
+
       return;
     }
 
-    setIsSearching(true);
-    setSearchError("");
+    setSearchLoading(true);
+    setMessage("");
     setSearchResults([]);
 
     try {
-      const results =
-        await searchPlaces(searchQuery);
+      const results = await searchPlaces(
+        query,
+        position[0],
+        position[1]
+      );
 
       if (results.length === 0) {
-        setSearchError("No locations found.");
-      } else {
-        setSearchResults(results);
-      }
-    } catch (error) {
-      setSearchError(
-        "Unable to search right now."
-      );
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  const addToRecentSearches = (result) => {
-    const recentItem = {
-      id: result.id,
-      name: result.name,
-      latitude: Number(result.latitude),
-      longitude: Number(result.longitude),
-      address: result.address || {},
-    };
-
-    const updatedRecent = [
-      recentItem,
-      ...recentSearches.filter(
-        (item) => item.id !== result.id
-      ),
-    ].slice(0, 5);
-
-    setRecentSearches(updatedRecent);
-
-    localStorage.setItem(
-      "recentSearches",
-      JSON.stringify(updatedRecent)
-    );
-  };
-
-  const handleSelectLocation = (result) => {
-    const position = [
-      Number(result.latitude),
-      Number(result.longitude),
-    ];
-
-    setSelectedLocation({
-      position,
-      name: result.name,
-      address: result.address || {},
-    });
-
-    setSearchResults([]);
-    setSearchQuery(result.name);
-    setSearchError("");
-
-    setRouteCoordinates([]);
-    setRouteInfo(null);
-    setRouteError("");
-
-    addToRecentSearches(result);
-  };
-
-  const selectRecentLocation = (location) => {
-    const position = [
-      Number(location.latitude),
-      Number(location.longitude),
-    ];
-
-    setSelectedLocation({
-      position,
-      name: location.name,
-      address: location.address || {},
-    });
-
-    setSearchQuery(location.name);
-    setSearchResults([]);
-    setSearchError("");
-
-    setRouteCoordinates([]);
-    setRouteInfo(null);
-    setRouteError("");
-  };
-
-  const clearRecentSearches = () => {
-    setRecentSearches([]);
-    localStorage.removeItem(
-      "recentSearches"
-    );
-  };
-
-  useEffect(() => {
-    if (!userPosition || !selectedLocation) {
-      return;
-    }
-
-    let cancelled = false;
-
-    const loadRoute = async () => {
-      setRouteLoading(true);
-      setRouteError("");
-
-      try {
-        const route = await getDrivingRoute(
-          userPosition,
-          selectedLocation.position
+        setMessage(
+          `No places found for "${query}".`
         );
 
-        if (!cancelled) {
-          setRouteCoordinates(
-            route.coordinates
-          );
-
-          setRouteInfo({
-            distance: route.distance,
-            duration: route.duration,
-          });
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setRouteError(
-            "Unable to calculate the route."
-          );
-
-          setRouteCoordinates([]);
-          setRouteInfo(null);
-        }
-      } finally {
-        if (!cancelled) {
-          setRouteLoading(false);
-        }
+        return;
       }
-    };
 
-    loadRoute();
+      setSearchResults(results);
+    } catch (error) {
+      console.error(error);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [userPosition, selectedLocation]);
-
-  const saveLocation = () => {
-    if (!selectedLocation) {
-      return;
-    }
-
-    const alreadySaved =
-      savedLocations.some(
-        (location) =>
-          Number(location.latitude) ===
-            selectedLocation.position[0] &&
-          Number(location.longitude) ===
-            selectedLocation.position[1]
+      setMessage(
+        "Search failed. Please try again."
       );
-
-    if (alreadySaved) {
-      return;
+    } finally {
+      setSearchLoading(false);
     }
-
-    const newLocation = {
-      id: Date.now(),
-      name: selectedLocation.name,
-      latitude:
-        selectedLocation.position[0],
-      longitude:
-        selectedLocation.position[1],
-      address:
-        selectedLocation.address || {},
-    };
-
-    const updatedLocations = [
-      ...savedLocations,
-      newLocation,
-    ];
-
-    setSavedLocations(updatedLocations);
-
-    localStorage.setItem(
-      "savedLocations",
-      JSON.stringify(updatedLocations)
-    );
   };
 
-  const selectSavedLocation = (location) => {
-    const position = [
-      Number(location.latitude),
-      Number(location.longitude),
+  const handleSearch = async (event) => {
+    event.preventDefault();
+
+    await performSearch(search);
+  };
+
+  const selectPlace = async (place) => {
+    const destinationPosition = [
+      place.latitude,
+      place.longitude,
     ];
 
-    setSelectedLocation({
-      position,
-      name: location.name,
-      address: location.address || {},
+    setDestination({
+      ...place,
+      position: destinationPosition,
     });
 
-    setSearchQuery(location.name);
-    setRouteCoordinates([]);
-    setRouteInfo(null);
-    setRouteError("");
+    setSearchResults([]);
+    setMessage("");
+
+    saveRecentSearch(place);
+
+    await calculateRoutes(
+      position,
+      destinationPosition
+    );
   };
 
-  const deleteSavedLocation = (id) => {
-    const updatedLocations =
-      savedLocations.filter(
-        (location) =>
-          location.id !== id
+  const calculateRoutes = async (
+    start,
+    destinationPosition
+  ) => {
+    setRouteLoading(true);
+    setRoutes([]);
+    setSelectedRouteId(null);
+
+    try {
+      const routeData =
+        await getDrivingRoutes(
+          start,
+          destinationPosition
+        );
+
+      setRoutes(routeData);
+
+      if (routeData.length > 0) {
+        setSelectedRouteId(
+          routeData[0].id
+        );
+      }
+    } catch (error) {
+      console.error(error);
+
+      setMessage(
+        "Unable to calculate a driving route."
       );
-
-    setSavedLocations(updatedLocations);
-
-    localStorage.setItem(
-      "savedLocations",
-      JSON.stringify(updatedLocations)
-    );
+    } finally {
+      setRouteLoading(false);
+    }
   };
 
   const clearRoute = () => {
-    setSelectedLocation(null);
-    setRouteCoordinates([]);
-    setRouteInfo(null);
-    setRouteError("");
+    setDestination(null);
+    setRoutes([]);
+    setSelectedRouteId(null);
     setSearchResults([]);
+    setMessage("");
   };
 
-  const isCurrentLocationSaved =
-    selectedLocation &&
-    savedLocations.some(
-      (location) =>
-        Number(location.latitude) ===
-          selectedLocation.position[0] &&
-        Number(location.longitude) ===
-          selectedLocation.position[1]
-    );
+  const selectRecentPlace = async (
+    place
+  ) => {
+    setSearch(place.name);
 
-  const mapPosition =
-    selectedLocation?.position ||
-    userPosition;
+    await selectPlace(place);
+  };
 
-  const address =
-    selectedLocation?.address || {};
+  const selectSavedPlace = async (
+    place
+  ) => {
+    setSearch(place.name);
+
+    await selectPlace(place);
+  };
+
+  const selectedRoute =
+    routes.find(
+      (route) =>
+        route.id === selectedRouteId
+    ) || null;
 
   return (
-    <div className="map-view">
+    <div className="map-explorer">
+      <aside className="explorer-panel">
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">
+              EXPLORE
+            </span>
 
-      {/* SIDEBAR */}
+            <h2>Map Explorer</h2>
+          </div>
 
-      <aside className="map-sidebar">
-
-        <div className="sidebar-title">
-          <small>MAP EXPLORER</small>
-          <h2>Find a location</h2>
+          {destination && (
+            <button
+              className="clear-route-button"
+              onClick={clearRoute}
+            >
+              Clear
+            </button>
+          )}
         </div>
 
-        {/* SEARCH */}
+        <div className="search-section">
+          <label htmlFor="place-search">
+            Search places
+          </label>
 
-        <form
-          className="search-form"
-          onSubmit={handleSearch}
+          <form
+            className="search-box"
+            onSubmit={handleSearch}
+          >
+            <span className="search-icon">
+              ⌕
+            </span>
+
+            <input
+              id="place-search"
+              type="text"
+              value={search}
+              onChange={(event) =>
+                setSearch(event.target.value)
+              }
+              placeholder="Search for a place..."
+            />
+
+            <button
+              type="submit"
+              disabled={searchLoading}
+            >
+              {searchLoading
+                ? "..."
+                : "Search"}
+            </button>
+          </form>
+        </div>
+
+        <button
+          className="location-button"
+          onClick={findMyLocation}
+          disabled={locationLoading}
         >
-          <input
-            className="search-input"
-            type="text"
-            placeholder="Search places..."
-            value={searchQuery}
-            onChange={(event) =>
-              setSearchQuery(
-                event.target.value
-              )
-            }
-          />
+          <span>◎</span>
 
-          <button
-            className="search-button"
-            type="submit"
-            disabled={isSearching}
-          >
-            {isSearching
-              ? "..."
-              : "Search"}
-          </button>
-        </form>
+          {locationLoading
+            ? "Finding location..."
+            : "Use my location"}
+        </button>
 
-        {/* QUICK ACTIONS */}
-
-        <div className="quick-actions">
-
-          <button
-            className="action-button primary"
-            onClick={getUserLocation}
-          >
-            📍 My Location
-          </button>
-
-          <button
-            className="action-button danger"
-            onClick={clearRoute}
-            disabled={
-              !selectedLocation &&
-              routeCoordinates.length === 0
-            }
-          >
-            Clear
-          </button>
-
-        </div>
-
-        {/* ERRORS */}
-
-        {searchError && (
-          <div className="error-message">
-            {searchError}
+        {message && (
+          <div className="message-box">
+            {message}
           </div>
         )}
-
-        {routeError && (
-          <div className="error-message">
-            {routeError}
-          </div>
-        )}
-
-        {/* SEARCH RESULTS */}
 
         {searchResults.length > 0 && (
-          <div className="search-results">
-
-            {searchResults.map((result) => (
-              <div
-                className="search-result"
-                key={result.id}
-                onClick={() =>
-                  handleSelectLocation(
-                    result
-                  )
-                }
-              >
-                📍 {result.name}
-              </div>
-            ))}
-
-          </div>
-        )}
-
-        {/* PLACE DETAILS */}
-
-        {selectedLocation && (
-          <section className="panel-card place-details">
-
-            <div className="panel-heading">
-              <strong>
-                📍 Place Details
-              </strong>
+          <div className="results-section">
+            <div className="section-heading">
+              Search results
             </div>
 
-            <div className="place-name">
-              {selectedLocation.name}
-            </div>
-
-            <div className="detail-row">
-              <span>Address</span>
-              <strong>
-                {address.road ||
-                  address.neighbourhood ||
-                  address.suburb ||
-                  address.city ||
-                  "Address unavailable"}
-              </strong>
-            </div>
-
-            <div className="detail-row">
-              <span>City</span>
-              <strong>
-                {address.city ||
-                  address.town ||
-                  address.village ||
-                  "Not available"}
-              </strong>
-            </div>
-
-            <div className="detail-row">
-              <span>Country</span>
-              <strong>
-                {address.country ||
-                  "Not available"}
-              </strong>
-            </div>
-
-            <div className="coordinates-box">
-
-              <div>
-                <span>Latitude</span>
-                <strong>
-                  {selectedLocation.position[0].toFixed(
-                    5
-                  )}
-                </strong>
-              </div>
-
-              <div>
-                <span>Longitude</span>
-                <strong>
-                  {selectedLocation.position[1].toFixed(
-                    5
-                  )}
-                </strong>
-              </div>
-
-            </div>
-
-          </section>
-        )}
-
-        {/* RECENT SEARCHES */}
-
-        <section className="panel-card">
-
-          <div className="panel-heading">
-
-            <strong>
-              🕘 Recent Searches
-            </strong>
-
-            {recentSearches.length > 0 && (
-              <button
-                className="clear-button"
-                onClick={
-                  clearRecentSearches
-                }
-              >
-                Clear
-              </button>
-            )}
-
-          </div>
-
-          {recentSearches.length === 0 ? (
-            <div className="empty-message">
-              No recent searches.
-            </div>
-          ) : (
-            recentSearches.map(
-              (location) => (
-                <div
-                  className="location-item"
-                  key={location.id}
-                  onClick={() =>
-                    selectRecentLocation(
-                      location
-                    )
-                  }
-                >
-                  <div className="location-name">
-                    {location.name}
-                  </div>
-                </div>
-              )
-            )
-          )}
-
-        </section>
-
-        {/* SAVED LOCATIONS */}
-
-        <section className="panel-card">
-
-          <div className="panel-heading">
-            <strong>
-              ⭐ Saved Locations
-            </strong>
-          </div>
-
-          {savedLocations.length === 0 ? (
-            <div className="empty-message">
-              No saved locations yet.
-            </div>
-          ) : (
-            savedLocations.map(
-              (location) => (
-                <div
-                  className="location-item"
-                  key={location.id}
-                >
-
-                  <div
-                    className="location-name"
-                    onClick={() =>
-                      selectSavedLocation(
-                        location
-                      )
-                    }
-                  >
-                    {location.name}
-                  </div>
-
+            <div className="results-list">
+              {searchResults.map(
+                (place) => (
                   <button
-                    className="remove-button"
+                    className="result-card"
+                    key={place.id}
                     onClick={() =>
-                      deleteSavedLocation(
-                        location.id
-                      )
+                      selectPlace(place)
                     }
                   >
-                    Remove
+                    <span className="result-icon">
+                      📍
+                    </span>
+
+                    <span className="result-content">
+                      <strong>
+                        {place.name}
+                      </strong>
+
+                      <span>
+                        {place.displayName}
+                      </span>
+                    </span>
                   </button>
-
-                </div>
-              )
-            )
-          )}
-
-        </section>
-
-      </aside>
-
-      {/* MAP */}
-
-      <MapContainer
-        center={defaultPosition}
-        zoom={13}
-        zoomControl={true}
-        scrollWheelZoom={true}
-        doubleClickZoom={true}
-        dragging={true}
-        style={{
-          height: "100%",
-          width: "100%",
-        }}
-      >
-
-        <LayersControl
-          position="topright"
-        >
-
-          <LayersControl.BaseLayer
-            checked
-            name="Street Map"
-          >
-            <TileLayer
-              attribution="&copy; OpenStreetMap contributors"
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            />
-          </LayersControl.BaseLayer>
-
-          <LayersControl.BaseLayer
-            name="Topographic Map"
-          >
-            <TileLayer
-              attribution="&copy; OpenTopoMap contributors"
-              url="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
-            />
-          </LayersControl.BaseLayer>
-
-        </LayersControl>
-
-        {/* CURRENT LOCATION */}
-
-        {userPosition && (
-          <Marker
-            position={userPosition}
-          >
-            <Popup>
-
-              <strong>
-                Your Current Location
-              </strong>
-
-              <br />
-
-              Latitude:{" "}
-              {userPosition[0].toFixed(
-                5
+                )
               )}
-
-              <br />
-
-              Longitude:{" "}
-              {userPosition[1].toFixed(
-                5
-              )}
-
-            </Popup>
-          </Marker>
-        )}
-
-        {/* DESTINATION */}
-
-        {selectedLocation && (
-          <Marker
-            position={
-              selectedLocation.position
-            }
-          >
-            <Popup>
-
-              <strong>
-                {selectedLocation.name}
-              </strong>
-
-              <br />
-
-              {address.city ||
-                address.town ||
-                address.village ||
-                ""}
-
-            </Popup>
-          </Marker>
-        )}
-
-        {/* ROUTE */}
-
-        {routeCoordinates.length > 0 && (
-          <Polyline
-            positions={
-              routeCoordinates
-            }
-            pathOptions={{
-              color: "#2563eb",
-              weight: 6,
-              opacity: 0.8,
-            }}
-          />
-        )}
-
-        {!routeCoordinates.length &&
-          mapPosition && (
-            <LocationController
-              position={mapPosition}
-            />
-          )}
-
-        {routeCoordinates.length > 0 && (
-          <RouteController
-            coordinates={
-              routeCoordinates
-            }
-          />
-        )}
-
-      </MapContainer>
-
-      {/* ROUTE LOADING */}
-
-      {routeLoading && (
-        <div className="loading-card">
-          🚗 Calculating route...
-        </div>
-      )}
-
-      {/* ROUTE INFORMATION */}
-
-      {routeInfo &&
-        !routeLoading && (
-          <div className="route-card">
-
-            <div className="route-title">
-              🚗 Driving Route
             </div>
+          </div>
+        )}
 
-            <div className="route-details">
-
-              <div className="route-detail">
-                <span>Distance</span>
-
-                <strong>
-                  {(
-                    routeInfo.distance /
-                    1000
-                  ).toFixed(1)}{" "}
-                  km
-                </strong>
-              </div>
-
-              <div className="route-detail">
-                <span>
-                  Estimated time
+        {destination && (
+          <>
+            <div className="route-header">
+              <div>
+                <span className="eyebrow">
+                  NAVIGATION
                 </span>
 
-                <strong>
-                  {formatDuration(
-                    routeInfo.duration
-                  )}
-                </strong>
+                <h3>
+                  Routes to{" "}
+                  {destination.name}
+                </h3>
               </div>
 
+              <button
+                className="save-button"
+                onClick={() =>
+                  savePlace(destination)
+                }
+              >
+                ☆ Save
+              </button>
             </div>
 
-          </div>
+            {routeLoading ? (
+              <div className="route-loading">
+                <div className="loading-spinner"></div>
+                <span>
+                  Finding driving routes...
+                </span>
+              </div>
+            ) : routes.length > 0 ? (
+              <div className="routes-section">
+                <div className="suggested-label">
+                  <span>✦</span>
+                  Suggested route
+                </div>
+
+                {routes.map(
+                  (route, index) => {
+                    const isSelected =
+                      route.id ===
+                      selectedRouteId;
+
+                    return (
+                      <button
+                        key={route.id}
+                        className={`route-card ${
+                          isSelected
+                            ? "selected"
+                            : ""
+                        }`}
+                        onClick={() =>
+                          setSelectedRouteId(
+                            route.id
+                          )
+                        }
+                      >
+                        <div className="route-number">
+                          {index + 1}
+                        </div>
+
+                        <div className="route-content">
+                          <div className="route-title-row">
+                            <strong>
+                              Route{" "}
+                              {index + 1}
+                            </strong>
+
+                            {index === 0 && (
+                              <span className="recommended-badge">
+                                Suggested
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="route-details">
+                            <span>
+                              🕐{" "}
+                              {formatDuration(
+                                route.duration
+                              )}
+                            </span>
+
+                            <span>
+                              📏{" "}
+                              {formatDistance(
+                                route.distance
+                              )}
+                            </span>
+                          </div>
+                        </div>
+
+                        <span className="route-arrow">
+                          →
+                        </span>
+                      </button>
+                    );
+                  }
+                )}
+              </div>
+            ) : (
+              <div className="no-route">
+                No driving route found.
+              </div>
+            )}
+
+            {selectedRoute && (
+              <div className="route-summary">
+                <div className="summary-item">
+                  <span>Distance</span>
+                  <strong>
+                    {formatDistance(
+                      selectedRoute.distance
+                    )}
+                  </strong>
+                </div>
+
+                <div className="summary-item">
+                  <span>Estimated time</span>
+                  <strong>
+                    {formatDuration(
+                      selectedRoute.duration
+                    )}
+                  </strong>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
-      {/* SAVE LOCATION */}
+        {!destination &&
+          recentSearches.length > 0 && (
+            <div className="saved-section">
+              <div className="section-heading">
+                Recent searches
+              </div>
 
-      {selectedLocation && (
-        <button
-          className={`save-button ${
-            isCurrentLocationSaved
-              ? "saved"
-              : ""
-          }`}
-          onClick={saveLocation}
-          disabled={
-            isCurrentLocationSaved
-          }
+              <div className="small-list">
+                {recentSearches.map(
+                  (place) => (
+                    <button
+                      className="small-place"
+                      key={place.id}
+                      onClick={() =>
+                        selectRecentPlace(
+                          place
+                        )
+                      }
+                    >
+                      <span>↻</span>
+                      <span>
+                        {place.name}
+                      </span>
+                    </button>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+
+        {!destination &&
+          savedPlaces.length > 0 && (
+            <div className="saved-section">
+              <div className="section-heading">
+                Saved locations
+              </div>
+
+              <div className="small-list">
+                {savedPlaces.map(
+                  (place) => (
+                    <div
+                      className="saved-place-row"
+                      key={place.id}
+                    >
+                      <button
+                        className="small-place"
+                        onClick={() =>
+                          selectSavedPlace(
+                            place
+                          )
+                        }
+                      >
+                        <span>★</span>
+
+                        <span>
+                          {place.name}
+                        </span>
+                      </button>
+
+                      <button
+                        className="remove-save"
+                        onClick={() =>
+                          removeSavedPlace(
+                            place.id
+                          )
+                        }
+                        title="Remove saved location"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+
+        <div className="panel-footer">
+          <span className="footer-dot"></span>
+          Map ready to explore
+        </div>
+      </aside>
+
+      <section className="map-area">
+        <MapContainer
+          center={DEFAULT_LOCATION}
+          zoom={13}
+          scrollWheelZoom={true}
+          className="leaflet-map"
         >
-          {isCurrentLocationSaved
-            ? "✓ Saved"
-            : "⭐ Save Location"}
-        </button>
-      )}
+          <TileLayer
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          />
 
+          {!destination && (
+            <MapController
+              position={position}
+            />
+          )}
+
+          {destination && (
+            <RouteController
+              start={position}
+              destination={
+                destination.position
+              }
+            />
+          )}
+
+          <Marker
+            position={position}
+            icon={currentLocationIcon}
+          >
+            <Popup>
+              <strong>
+                Your current location
+              </strong>
+              <br />
+              Starting point
+            </Popup>
+          </Marker>
+
+          {destination && (
+            <Marker
+              position={destination.position}
+              icon={destinationIcon}
+            >
+              <Popup>
+                <strong>
+                  {destination.name}
+                </strong>
+                <br />
+                Destination
+              </Popup>
+            </Marker>
+          )}
+
+          {routes.map((route) => {
+            const isSelected =
+              route.id ===
+              selectedRouteId;
+
+            const coordinates =
+              route.geometry.coordinates.map(
+                ([longitude, latitude]) => [
+                  latitude,
+                  longitude,
+                ]
+              );
+
+            return (
+              <Polyline
+                key={route.id}
+                positions={coordinates}
+                pathOptions={{
+                  color: isSelected
+                    ? "#111827"
+                    : "#94a3b8",
+                  weight: isSelected
+                    ? 7
+                    : 5,
+                  opacity: isSelected
+                    ? 0.95
+                    : 0.55,
+                  lineCap: "round",
+                  lineJoin: "round",
+                }}
+                eventHandlers={{
+                  click: () =>
+                    setSelectedRouteId(
+                      route.id
+                    ),
+                }}
+              />
+            );
+          })}
+        </MapContainer>
+
+        <div className="map-overlay">
+          <div className="map-overlay-title">
+            {destination
+              ? "Route Preview"
+              : "Live Map"}
+          </div>
+
+          <div className="map-overlay-subtitle">
+            {destination
+              ? "Click a route to select it"
+              : "Explore locations and plan routes"}
+          </div>
+        </div>
+
+        <button
+          className="floating-location-button"
+          onClick={findMyLocation}
+          title="Find my location"
+        >
+          ◎
+        </button>
+
+        {selectedRoute && (
+          <div className="map-route-info">
+            <div>
+              <span>
+                Suggested route
+              </span>
+
+              <strong>
+                {formatDuration(
+                  selectedRoute.duration
+                )}
+              </strong>
+            </div>
+
+            <div>
+              <span>Distance</span>
+
+              <strong>
+                {formatDistance(
+                  selectedRoute.distance
+                )}
+              </strong>
+            </div>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
